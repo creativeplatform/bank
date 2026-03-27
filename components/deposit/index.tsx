@@ -1,10 +1,10 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   CrossmintCheckoutProvider,
   CrossmintProvider,
   useAuth,
 } from "@crossmint/client-sdk-react-ui";
-import { WertCheckout } from "./WertCheckout";
+import { CoinbaseOnrampCheckout } from "./CoinbaseOnrampCheckout";
 import { AmountInput } from "../common/AmountInput";
 import { Modal } from "../common/Modal";
 import { useActivityFeed } from "../../hooks/useActivityFeed";
@@ -34,6 +34,14 @@ export function DepositModal({ open, onClose, walletAddress }: DepositModalProps
     setAmount("");
   };
 
+  // Reset to options whenever the modal is opened so reopening always shows a fresh flow
+  useEffect(() => {
+    if (open) {
+      setStep("options");
+      setAmount("");
+    }
+  }, [open]);
+
   const handleDone = () => {
     restartFlow();
     onClose();
@@ -43,7 +51,7 @@ export function DepositModal({ open, onClose, walletAddress }: DepositModalProps
     refetchActivityFeed();
     refetchBalance();
     handleDone();
-  }, [refetchActivityFeed]);
+  }, [refetchActivityFeed, refetchBalance, handleDone]);
 
   const handleProcessingPayment = useCallback(() => {
     setStep("processing");
@@ -75,7 +83,7 @@ export function DepositModal({ open, onClose, walletAddress }: DepositModalProps
           </div>
         )}
         <div className="flex w-full flex-grow flex-col">
-          <WertCheckout
+          <CoinbaseOnrampCheckout
             amount={amount}
             isAmountValid={Number(amount) <= MAX_AMOUNT && Number(amount) >= 1}
             walletAddress={walletAddress}
