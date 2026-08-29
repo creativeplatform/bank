@@ -2,28 +2,31 @@
 
 import { type ReactNode } from "react";
 
-import { MEMBERSHIP_LOCKS, type MembershipTier } from "@/lib/config/memberships";
+import { TIER_PRIORITY, type MembershipTier } from "@/lib/config/memberships";
 import { useMembership } from "@/context/MembershipContext";
 import { UnlockPrompt } from "@/components/unlock/UnlockPrompt";
-
-const PRIORITY_TABLE = MEMBERSHIP_LOCKS.reduce<Record<MembershipTier, number>>((acc, lock) => {
-  acc[lock.tier] = lock.priority;
-  return acc;
-}, {
-  "Creative Brand": 3,
-  "Creative Investor": 2,
-  "Creative Creator": 1,
-});
 
 type PremiumGuardProps = {
   requiredTier: MembershipTier;
   children: ReactNode;
+  /**
+   * When true, renders nothing if the user lacks the required tier
+   * (instead of an UnlockPrompt). Use on secondary guards sharing a page
+   * with another PremiumGuard so the prompt box is not duplicated.
+   */
+  silent?: boolean;
 };
 
-export function PremiumGuard({ requiredTier, children }: PremiumGuardProps) {
-  const membership = useMembership();
+/**
+ * Gates content behind a minimum membership tier.
+ * Uses TIER_PRIORITY to compare the user's tier against the required tier.
+ * A Brand member (priority 3) can access Creator-gated content (priority 1).
+ */
+export function PremiumGuard({ requiredTier, children, silent = false }: PremiumGuardProps) {
+  const { tier, isLoading } = useMembership();
 
-  if (membership.isLoading) {
+  if (isLoading) {
+    if (silent) return null;
     return (
       <section className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white/70 p-6 text-sm text-slate-600">
         <span className="animate-pulse text-slate-500">Checking membership access…</span>
@@ -31,15 +34,13 @@ export function PremiumGuard({ requiredTier, children }: PremiumGuardProps) {
     );
   }
 
-  const hasAnyValidMembership = MEMBERSHIP_LOCKS.some((lock) => {
-    const state = membership.locks[lock.tier];
-    return Boolean(state?.hasValidKey);
-  });
+  const userPriority = tier ? TIER_PRIORITY[tier] : TIER_PRIORITY.None;
+  const requiredPriority = TIER_PRIORITY[requiredTier];
 
-  if (!hasAnyValidMembership) {
-    return <UnlockPrompt />;
+  if (userPriority < requiredPriority) {
+    if (silent) return null;
+    return <UnlockPrompt currentTier={tier} />;
   }
 
   return <>{children}</>;
 }
-

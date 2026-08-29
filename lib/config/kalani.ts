@@ -14,8 +14,8 @@ export const KALANI_VAULT_ADDRESSES = {
   addressProvider: "0x1e9778aAD41Aa3E0884C276fB4C2D03C4036Aa0B" as Address,
 
   // Creative Bank USDC Vault (cbUSDC)
-  creativeBankVault: "0xec8C6e90e8e84A368cbF2c2fd13DdF67884Ec5EE" as Address,
-  roleManager: "0xAE31C2098a42aAB31b447876E4DAa649c16A307b" as Address,
+  creativeBankVault: "0x882652a70f32Bb3606C357E2e314C63Eb1C29912" as Address,
+  roleManager: "0xd3b7513ee10f63416b74254d76d0cb892fb70307" as Address,
   registry: "0x2aC025aE91dddcda3BB7D8EaB11efA3608dAF634" as Address,
   accountant: "0x928a31A7727e53CBE9f99fAb39eFb705c933093e" as Address,
   debtAllocator: "0xD1803ECCb53645D5bde0AE2FB1b55a2254fe358e" as Address,
@@ -28,12 +28,11 @@ export const KALANI_CHAIN_ID = 8453;
  * Use this address when integrating with the Yearn Registry or GOAT agent.
  * ERC-4626 compliant; underlying asset: USDC.
  */
-export const YEARN_USDC_VAULT_BASE =
-  "0xb13CF163d916917d9cD6E836905cA5f12a1dEF4B" as Address;
+export const YEARN_USDC_VAULT_BASE = "0xb13CF163d916917d9cD6E836905cA5f12a1dEF4B" as Address;
 
 /** Fallback vault address when NEXT_PUBLIC_CREATIVE_BANK_YEARN_VAULT_ADDRESS is not set (legacy Kalani). */
 const CREATIVE_BANK_VAULT_ADDRESS_FALLBACK =
-  "0xec8C6e90e8e84A368cbF2c2fd13DdF67884Ec5EE" as Address;
+  "0x882652a70f32Bb3606C357E2e314C63Eb1C29912" as Address;
 
 /**
  * Creative Bank Vault Details (Yearn V3 USDC allocator on Base).
@@ -59,6 +58,5 @@ export const CREATIVE_BANK_VAULT = {
  * with (brandNFT, investorNFT, creatorNFT) = Creative Brand, Creative Investor, Creative Creator lock addresses.
  * Then call set_deposit_limit_module(bouncerAddress) on the Yearn vault.
  */
-export const CREATIVE_BANK_BOUNCER_ADDRESS: Address | undefined =
-  process.env.NEXT_PUBLIC_CREATIVE_BANK_BOUNCER_ADDRESS as Address | undefined;
-
+export const CREATIVE_BANK_BOUNCER_ADDRESS: Address | undefined = process.env
+  .NEXT_PUBLIC_CREATIVE_BANK_BOUNCER_ADDRESS as Address | undefined;

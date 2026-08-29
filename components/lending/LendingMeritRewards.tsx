@@ -7,6 +7,11 @@ import { useSendTransaction } from "@aave/react/viem";
 
 import { AAVE_TARGET_CHAIN_ID } from "@/lib/config/aave";
 import type { WalletClient } from "viem";
+import {
+  normalizeTxErrorMessage,
+  showTxErrorToast,
+  showTxSuccessToast,
+} from "@/lib/transactionToast";
 
 type LendingMeritRewardsProps = {
   userEvm: ReturnType<typeof evmAddress>;
@@ -33,15 +38,26 @@ export function LendingMeritRewards({
     setMeritError(null);
     const result = await sendTransaction(meritRewards.transaction);
     if (result.isErr()) {
-      setMeritError(result.error?.message ?? "Claim failed");
+      const message = normalizeTxErrorMessage(result.error, "Claim failed");
+      setMeritError(message);
+      showTxErrorToast({ title: "Claim failed", description: message });
+      return;
     }
+    const txHash = typeof result.value === "string" ? result.value : undefined;
+    showTxSuccessToast({
+      title: "Rewards claimed",
+      description: "Merit rewards claimed successfully.",
+      txHash,
+    });
   }, [meritRewards, walletClient, sendTransaction]);
 
   if (!walletAddress) {
     return (
       <section className="rounded-2xl border border-slate-200 bg-white/80 p-6 shadow-sm">
         <h2 className="mb-4 text-lg font-semibold text-slate-900">Merit rewards</h2>
-        <p className="text-sm text-slate-500">Connect a wallet to see and claim your Merit rewards.</p>
+        <p className="text-sm text-slate-500">
+          Connect a wallet to see and claim your Merit rewards.
+        </p>
       </section>
     );
   }
@@ -58,7 +74,7 @@ export function LendingMeritRewards({
             type="button"
             onClick={handleClaimMerit}
             disabled={sending.loading || !walletClient}
-            className="w-fit rounded-full bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            className="bg-primary text-primary-foreground hover:bg-primary/90 w-fit rounded-full px-4 py-2 text-sm font-semibold disabled:opacity-50"
           >
             {sending.loading ? "Claiming…" : "Claim rewards"}
           </button>

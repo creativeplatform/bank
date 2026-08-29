@@ -7,8 +7,13 @@ import {
   NEXUS_COVER_BROKER_ADDRESS,
   NEXUS_COVER_CHAIN_ID,
   COVER_BROKER_ABI,
+  toBigIntSafe,
 } from "@/lib/config/nexus-mutual";
-import type { NexusQuoteResult, NexusBuyCoverParams, NexusPoolAllocationRequest } from "./useNexusCoverQuote";
+import type {
+  NexusQuoteResult,
+  NexusBuyCoverParams,
+  NexusPoolAllocationRequest,
+} from "./useNexusCoverQuote";
 
 /**
  * Converts IPFS CID or hex string to bytes for CoverBroker.buyCover ipfsData.
@@ -47,30 +52,31 @@ function quoteToContractArgs(quote: NexusQuoteResult): [
   const p: NexusBuyCoverParams = quote.buyCoverInput.buyCoverParams;
   const coverAssetNum =
     typeof p.coverAsset === "string"
-      ? (["ETH", "DAI", "USDC", "cbBTC"].indexOf(p.coverAsset) >= 0
-          ? ["ETH", "DAI", "USDC", "cbBTC"].indexOf(p.coverAsset)
-          : 0)
+      ? ["ETH", "DAI", "USDC", "cbBTC"].indexOf(p.coverAsset) >= 0
+        ? ["ETH", "DAI", "USDC", "cbBTC"].indexOf(p.coverAsset)
+        : 0
       : p.coverAsset;
   const commissionBps = Math.round((p.commissionRatio ?? 0) * 10000);
 
   const params = {
-    productId: BigInt(p.productId),
-    coverId: BigInt(p.coverId ?? 0),
+    productId: toBigIntSafe(p.productId),
+    coverId: toBigIntSafe(p.coverId ?? 0),
     owner: p.owner as `0x${string}`,
-    coverAsset: BigInt(coverAssetNum),
-    period: BigInt(p.period),
-    amount: BigInt(p.amount),
+    coverAsset: toBigIntSafe(coverAssetNum),
+    period: toBigIntSafe(p.period),
+    amount: toBigIntSafe(p.amount),
     commissionRatio: commissionBps,
-    paymentAsset: BigInt(p.paymentAsset ?? coverAssetNum),
-    maxPremiumInAsset: BigInt(p.maxPremiumInAsset),
-    commissionDestination: (p.commissionDestination ?? "0x0000000000000000000000000000000000000000") as `0x${string}`,
+    paymentAsset: toBigIntSafe(p.paymentAsset ?? coverAssetNum),
+    maxPremiumInAsset: toBigIntSafe(p.maxPremiumInAsset),
+    commissionDestination: (p.commissionDestination ??
+      "0x0000000000000000000000000000000000000000") as `0x${string}`,
     ipfsData: ipfsDataToBytes(p.ipfsData),
   };
 
   const poolRequests: Array<{ poolId: bigint; coverAmountInAsset: bigint; skip: boolean }> =
     quote.buyCoverInput.poolAllocationRequests.map((r: NexusPoolAllocationRequest) => ({
-      poolId: BigInt(r.poolId),
-      coverAmountInAsset: BigInt(r.coverAmountInAsset),
+      poolId: toBigIntSafe(r.poolId),
+      coverAmountInAsset: toBigIntSafe(r.coverAmountInAsset),
       skip: r.skip ?? false,
     }));
 
@@ -86,6 +92,7 @@ type UseNexusBuyCoverReturn = {
   buyCover: (() => void) | undefined;
   isPending: boolean;
   isSuccess: boolean;
+  txHash?: `0x${string}`;
   error: Error | null;
   reset: () => void;
   isCorrectChain: boolean;
@@ -119,6 +126,7 @@ export function useNexusBuyCover({
     writeContract,
     isPending,
     isSuccess,
+    data: txHash,
     error: writeError,
     reset,
   } = useWriteContract({
@@ -147,7 +155,10 @@ export function useNexusBuyCover({
       functionName: "buyCover",
       args: [params, poolRequests],
       chainId: NEXUS_COVER_CHAIN_ID,
-      value: quote.buyCoverInput.buyCoverParams.paymentAsset === 0 ? BigInt(quote.buyCoverInput.buyCoverParams.maxPremiumInAsset) : 0n,
+      value:
+        quote.buyCoverInput.buyCoverParams.paymentAsset === 0
+          ? toBigIntSafe(quote.buyCoverInput.buyCoverParams.maxPremiumInAsset)
+          : 0n,
     });
   }, [
     enabled,
@@ -164,6 +175,7 @@ export function useNexusBuyCover({
     buyCover: params && poolRequests ? buyCover : undefined,
     isPending,
     isSuccess,
+    txHash,
     error: writeError ?? null,
     reset,
     isCorrectChain,

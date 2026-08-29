@@ -1,32 +1,29 @@
 import { createConfig, createStorage, fallback, http, noopStorage } from "wagmi";
+import { createClient } from "viem";
 import { injected, walletConnect } from "wagmi/connectors";
 import { base, baseSepolia, mainnet } from "wagmi/chains";
+import { Attribution } from "ox/erc8021";
 
 // Public RPC endpoints for Base - these are free and rate-limited
 const DEFAULT_BASE_RPC_URL = "https://mainnet.base.org";
 const DEFAULT_BASE_SEPOLIA_RPC_URL = "https://sepolia.base.org";
 
-// Additional public fallback endpoints
-const BASE_PUBLIC_RPC_ENDPOINTS = [
-  "https://base.gateway.tenderly.co",
-  "https://base-rpc.publicnode.com",
-  "https://1rpc.io/base",
-  "https://base.meowrpc.com",
-];
+// Base Builder Code — appended to all transactions for onchain attribution
+const BUILDER_CODE = process.env.NEXT_PUBLIC_BUILDER_CODE;
+const DATA_SUFFIX = BUILDER_CODE ? Attribution.toDataSuffix({ codes: [BUILDER_CODE] }) : undefined;
 
-const isProduction = process.env.NODE_ENV === "production";
 const configuredChain = process.env.NEXT_PUBLIC_CHAIN_ID;
 
+const APP_URL =
+  process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") || "https://finance.creativeplatform.xyz";
+
 export const appChain = (() => {
-  if (isProduction) {
-    return base;
+  // Only use base-sepolia when explicitly configured; default to base mainnet
+  if (configuredChain === "base-sepolia") {
+    return baseSepolia;
   }
 
-  if (configuredChain === "base" || configuredChain === "base-mainnet") {
-    return base;
-  }
-
-  return baseSepolia;
+  return base;
 })();
 
 // Validate Alchemy API key format (should be alphanumeric with hyphens, not empty)
@@ -35,40 +32,36 @@ const isValidAlchemyKey = (key: string | undefined): boolean => {
   // Alchemy keys are typically alphanumeric with hyphens, at least 20 chars
   // Exclude keys that look like placeholder values
   const trimmed = key.trim();
-  return trimmed.length >= 20 && !trimmed.includes('xxx') && !trimmed.includes('your_');
+  return trimmed.length >= 20 && !trimmed.includes("xxx") && !trimmed.includes("your_");
 };
 
 // Build Base Mainnet RPC endpoints with fallbacks
 const buildBaseRpcEndpoints = () => {
   const endpoints = [];
 
-  // 1. Custom Alchemy endpoint (if provided and valid)
+  // 1. Server-side RPC proxy — keeps API keys secure and avoids browser rate limits.
+  //    The proxy at /api/rpc/base forwards to Alchemy (if ALCHEMY_API_KEY is set)
+  //    or to a configured BASE_RPC_URL on the server.
+  endpoints.push(
+    http("/api/rpc/base", {
+      batch: {
+        wait: 50,
+      },
+      retryCount: 2,
+      retryDelay: 500,
+    })
+  );
+
+  // 2. Client-side Alchemy endpoint (if NEXT_PUBLIC key provided)
   const alchemyKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
   if (isValidAlchemyKey(alchemyKey)) {
     endpoints.push(
       http(`https://base-mainnet.g.alchemy.com/v2/${alchemyKey}`, {
         batch: {
-          wait: 50, // Wait 50ms before sending batch
-        },
-        retryCount: 2, // Reduced retries to fail faster to fallback
-        retryDelay: 500, // Faster retry delay
-      })
-    );
-  } else if (alchemyKey) {
-    console.warn(
-      `[wagmiConfig] Alchemy API key appears invalid or is a placeholder. Skipping Alchemy endpoint. Using public RPCs only.`
-    );
-  }
-
-  // 2. Custom RPC URL (if provided)
-  const customRpcUrl = process.env.NEXT_PUBLIC_BASE_RPC_URL;
-  if (customRpcUrl && customRpcUrl !== DEFAULT_BASE_RPC_URL) {
-    endpoints.push(
-      http(customRpcUrl, {
-        batch: {
           wait: 50,
         },
         retryCount: 2,
+        retryDelay: 500,
       })
     );
   }
@@ -79,25 +72,10 @@ const buildBaseRpcEndpoints = () => {
       batch: {
         wait: 50,
       },
-      retryCount: 2,
+      retryCount: 1,
     })
   );
 
-  // 4. Additional public fallbacks (sample 2 random ones to avoid always hitting the same endpoint)
-  const shuffledFallbacks = [...BASE_PUBLIC_RPC_ENDPOINTS].sort(() => Math.random() - 0.5);
-  shuffledFallbacks.slice(0, 2).forEach((url) => {
-    endpoints.push(
-      http(url, {
-        batch: {
-          wait: 100, // Longer wait for public endpoints
-        },
-        retryCount: 1,
-      })
-    );
-  });
-
-  console.log(`[wagmiConfig] Configured ${endpoints.length} RPC endpoints for Base Mainnet`);
-  
   return endpoints;
 };
 
@@ -118,7 +96,8 @@ const buildBaseSepoliaRpcEndpoints = () => {
   }
 
   // Custom or default Sepolia RPC
-  const sepoliaRpcUrl = process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL ?? DEFAULT_BASE_SEPOLIA_RPC_URL;
+  const sepoliaRpcUrl =
+    process.env.NEXT_PUBLIC_BASE_SEPOLIA_RPC_URL ?? DEFAULT_BASE_SEPOLIA_RPC_URL;
   endpoints.push(
     http(sepoliaRpcUrl, {
       batch: { wait: 50 },
@@ -153,7 +132,7 @@ const transports = {
 const walletConnectProjectId = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
 
 // Only initialize WalletConnect in the browser to avoid SSR issues with indexedDB
-const isBrowser = typeof window !== 'undefined';
+const isBrowser = typeof window !== "undefined";
 
 const connectors = [
   injected({
@@ -166,8 +145,8 @@ const connectors = [
           metadata: {
             name: "Creative Bank",
             description: "Creative Bank DeFi access",
-            url: "https://creativeplatform.xyz",
-            icons: ["https://creativeplatform.xyz/icon.png"],
+            url: APP_URL,
+            icons: [`${APP_URL}/icon.png`],
           },
         }),
       ]
@@ -176,7 +155,13 @@ const connectors = [
 
 export const wagmiConfig = createConfig({
   chains: [base, baseSepolia, mainnet],
-  transports,
+  client({ chain }) {
+    return createClient({
+      chain,
+      transport: transports[chain.id] ?? http(),
+      ...(DATA_SUFFIX ? { dataSuffix: DATA_SUFFIX } : {}),
+    });
+  },
   connectors,
   ssr: true,
   storage: createStorage({
@@ -185,4 +170,3 @@ export const wagmiConfig = createConfig({
 });
 
 export const isBaseMainnet = appChain.id === base.id;
-

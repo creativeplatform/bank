@@ -16,8 +16,7 @@ export const NEXUS_YEARN_V3_PRODUCT_ID = 123;
 export const NEXUS_COVER_CHAIN_ID = 1;
 
 /** CoverBroker contract on Ethereum mainnet (from @nexusmutual/sdk addresses). */
-export const NEXUS_COVER_BROKER_ADDRESS: Address =
-  "0xCB2B736652D2dBf7d72e4dB880Cf6B7d99507814";
+export const NEXUS_COVER_BROKER_ADDRESS: Address = "0xCB2B736652D2dBf7d72e4dB880Cf6B7d99507814";
 
 /** Min cover period in days (Nexus Mutual). */
 export const NEXUS_MIN_COVER_PERIOD_DAYS = 28;
@@ -27,6 +26,33 @@ export const NEXUS_MAX_COVER_PERIOD_DAYS = 365;
 
 /** Min cover amount in USD (from products.json minPrice). */
 export const NEXUS_MIN_COVER_USD = 100;
+
+/**
+ * Safely coerce a value (which may be a number, decimal string, or integer
+ * string) into a BigInt of base units. The Nexus SDK occasionally returns
+ * fractional values (e.g. 9999.8) for premium/amount fields; calling BigInt()
+ * directly on those throws "cannot be converted to a BigInt". We floor the
+ * value to the nearest integer to keep the flow resilient.
+ */
+export function toBigIntSafe(value: string | number | bigint | undefined | null): bigint {
+  if (value == null) return 0n;
+  if (typeof value === "bigint") return value;
+  // Numbers must be handled before String(): large wei values (>= 1e21)
+  // stringify to scientific notation (e.g. "1e+21"), which BigInt() rejects.
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return 0n;
+    return BigInt(Math.floor(value));
+  }
+  const str = value.trim();
+  if (str === "") return 0n;
+  // Drop any fractional component: base units must be integers.
+  const integerPart = str.split(".")[0];
+  try {
+    return BigInt(integerPart === "" || integerPart === "-" ? "0" : integerPart);
+  } catch {
+    return 0n;
+  }
+}
 
 /**
  * CoverAsset enum values used by Nexus Mutual API/contracts.

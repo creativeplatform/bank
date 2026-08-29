@@ -1,35 +1,111 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Address, formatUnits, parseUnits } from "viem";
+import { Address, encodeFunctionData, formatUnits, parseUnits } from "viem";
 import { useAccount, usePublicClient } from "wagmi";
-import { useAuth, useWallet } from "@crossmint/client-sdk-react-ui";
-import {
-  bigDecimal,
-  evmAddress,
-  useVaultDeposit,
-  useVaultRedeemShares,
-  useVaultDepositPreview,
-  useVaultRedeemPreview,
-  useVaultWithdraw,
-  useVaultWithdrawPreview,
-} from "@aave/react";
+import { useAuth } from "@/context/AuthContext";
+import { useWallet } from "@crossmint/client-sdk-react-ui";
 
 import { Modal } from "@/components/common/Modal";
 import { useAaveWalletClient } from "@/hooks/useAaveWalletClient";
-import { AAVE_TARGET_CHAIN_ID } from "@/lib/config/aave";
 import { formatUsd } from "@/lib/formatters";
 import { formatVaultShares } from "@/lib/yearnUtils";
-import { toast } from "sonner";
+import {
+  normalizeTxErrorMessage,
+  showTxErrorToast,
+  showTxSuccessToast,
+} from "@/lib/transactionToast";
 
 type WithdrawInputMode = "shares" | "asset";
 
 const TX_CONFIRMATION_TIMEOUT_MS = 120_000;
 
+const ERC20_ABI = [
+  {
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    name: "allowance",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    name: "approve",
+    outputs: [{ name: "", type: "bool" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+const ERC4626_DEPOSIT_ABI = [
+  {
+    inputs: [
+      { name: "assets", type: "uint256" },
+      { name: "receiver", type: "address" },
+    ],
+    name: "deposit",
+    outputs: [{ name: "shares", type: "uint256" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+const ERC4626_REDEEM_ABI = [
+  {
+    inputs: [
+      { name: "shares", type: "uint256" },
+      { name: "receiver", type: "address" },
+      { name: "owner", type: "address" },
+    ],
+    name: "redeem",
+    outputs: [{ name: "assets", type: "uint256" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+const ERC4626_WITHDRAW_ABI = [
+  {
+    inputs: [
+      { name: "assets", type: "uint256" },
+      { name: "receiver", type: "address" },
+      { name: "owner", type: "address" },
+    ],
+    name: "withdraw",
+    outputs: [{ name: "shares", type: "uint256" }],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+] as const;
+
+const ERC4626_CONVERT_ABI = [
+  {
+    inputs: [{ name: "shares", type: "uint256" }],
+    name: "convertToAssets",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [{ name: "assets", type: "uint256" }],
+    name: "convertToShares",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+] as const;
+
 type AaveVaultModalProps = {
   open: boolean;
   onClose: () => void;
   vaultAddress: Address;
+  assetAddress?: Address;
   assetSymbol?: string;
   assetDecimals?: number;
   shareDecimals?: number;
@@ -45,6 +121,7 @@ export function AaveVaultModal({
   open,
   onClose,
   vaultAddress,
+  assetAddress,
   assetSymbol = "USDC",
   assetDecimals = 6,
   shareDecimals,
@@ -61,12 +138,9 @@ export function AaveVaultModal({
   const { status: authStatus } = useAuth();
   const { status: walletStatus } = useWallet();
 
-  const [deposit] = useVaultDeposit();
-  const [redeem] = useVaultRedeemShares();
-  const [withdraw] = useVaultWithdraw();
-  const [depositPreview] = useVaultDepositPreview();
-  const [redeemPreview] = useVaultRedeemPreview();
-  const [withdrawPreview] = useVaultWithdrawPreview();
+  // Both deposit/withdrawal previews and transactions use direct on-chain
+  // ERC-4626 / ERC-20 contract calls instead of the Aave SDK, which throws
+  // unrecoverable InvariantError on GraphQL "Service panicked" errors.
 
   const [inputAmount, setInputAmount] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -87,7 +161,7 @@ export function AaveVaultModal({
   const inputDecimals = useMemo(() => {
     if (mode === "deposit") return assetDecimals;
     if (mode === "withdraw") {
-      return withdrawInputMode === "shares" ? resolvedShareDecimals ?? 18 : assetDecimals;
+      return withdrawInputMode === "shares" ? (resolvedShareDecimals ?? 18) : assetDecimals;
     }
     return assetDecimals;
   }, [mode, withdrawInputMode, assetDecimals, resolvedShareDecimals]);
@@ -113,7 +187,7 @@ export function AaveVaultModal({
         return null;
       }
     },
-    [],
+    []
   );
 
   const normalizedInputAmount = useMemo(() => {
@@ -132,81 +206,102 @@ export function AaveVaultModal({
   const hasPositiveInput = inputUnits != null && inputUnits > 0n;
 
   useEffect(() => {
-    if (mode === "deposit" && hasPositiveInput && normalizedInputAmount != null) {
-      setExpectedAssets(null);
-      depositPreview({
-        vault: evmAddress(vaultAddress),
-        chainId: AAVE_TARGET_CHAIN_ID,
-        amount: bigDecimal(normalizedInputAmount),
-      }).then((result) => {
-        if (result.isOk() && result.value?.amount?.value != null) {
-          setExpectedShares(String(result.value.amount.value));
-        } else {
-          setExpectedShares(null);
-        }
-      });
+    let active = true;
+    if (mode === "deposit" && hasPositiveInput && inputUnits != null && publicClient) {
+      setExpectedShares(null);
+      publicClient
+        .readContract({
+          address: vaultAddress,
+          abi: ERC4626_CONVERT_ABI,
+          functionName: "convertToShares",
+          args: [inputUnits],
+        })
+        .then((shares) => {
+          if (active)
+            setExpectedShares(formatUnits(shares, resolvedShareDecimals ?? assetDecimals));
+        })
+        .catch(() => {
+          if (active) setExpectedShares(null);
+        });
     } else {
       setExpectedShares(null);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- depositPreview is stable from hook
-  }, [mode, hasPositiveInput, normalizedInputAmount, vaultAddress]);
+    return () => {
+      active = false;
+    };
+  }, [
+    mode,
+    hasPositiveInput,
+    inputUnits,
+    vaultAddress,
+    publicClient,
+    resolvedShareDecimals,
+    assetDecimals,
+  ]);
 
   useEffect(() => {
-    if (
-      mode === "withdraw" &&
-      withdrawInputMode === "shares" &&
-      hasPositiveInput &&
-      normalizedInputAmount != null
-    ) {
+    if (!publicClient || !hasPositiveInput || inputUnits == null) {
+      setExpectedAssets(null);
+      setExpectedSharesToBurn(null);
+      return;
+    }
+    if (mode === "withdraw" && withdrawInputMode === "shares") {
       if (resolvedShareDecimals == null) {
         setExpectedAssets(null);
-        setExpectedShares(null);
         return;
       }
-      setExpectedShares(null);
       setExpectedSharesToBurn(null);
-      redeemPreview({
-        vault: evmAddress(vaultAddress),
-        chainId: AAVE_TARGET_CHAIN_ID,
-        amount: bigDecimal(normalizedInputAmount),
-      }).then((result) => {
-        if (result.isOk() && result.value?.amount?.value != null) {
-          setExpectedAssets(String(result.value.amount.value));
-        } else {
+      publicClient
+        .readContract({
+          address: vaultAddress,
+          abi: ERC4626_CONVERT_ABI,
+          functionName: "convertToAssets",
+          args: [inputUnits],
+        })
+        .then((assets) => setExpectedAssets(formatUnits(assets, assetDecimals)))
+        .catch(() => {
           setExpectedAssets(null);
-        }
-      });
-    } else if (
-      mode === "withdraw" &&
-      withdrawInputMode === "asset" &&
-      hasPositiveInput &&
-      normalizedInputAmount != null
-    ) {
+          setErrorMessage(
+            "Unable to preview withdrawal — please check your connection and try again."
+          );
+        });
+    } else if (mode === "withdraw" && withdrawInputMode === "asset") {
       if (resolvedShareDecimals == null) {
-        setExpectedAssets(null);
         setExpectedSharesToBurn(null);
         return;
       }
-      setExpectedShares(null);
       setExpectedAssets(null);
-      withdrawPreview({
-        vault: evmAddress(vaultAddress),
-        chainId: AAVE_TARGET_CHAIN_ID,
-        amount: bigDecimal(normalizedInputAmount),
-      }).then((result) => {
-        if (result.isOk() && result.value?.amount?.value != null) {
-          setExpectedSharesToBurn(String(result.value.amount.value));
-          setExpectedSharesToBurnDecimals(result.value.amount.decimals);
-        } else {
+      publicClient
+        .readContract({
+          address: vaultAddress,
+          abi: ERC4626_CONVERT_ABI,
+          functionName: "convertToShares",
+          args: [inputUnits],
+        })
+        .then((shares) => {
+          setExpectedSharesToBurn(formatUnits(shares, resolvedShareDecimals));
+          setExpectedSharesToBurnDecimals(resolvedShareDecimals);
+        })
+        .catch(() => {
           setExpectedSharesToBurn(null);
-        }
-      });
+          setErrorMessage(
+            "Unable to preview withdrawal — please check your connection and try again."
+          );
+        });
     } else {
       setExpectedAssets(null);
       setExpectedSharesToBurn(null);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- redeemPreview/withdrawPreview stable from hooks
-  }, [mode, withdrawInputMode, hasPositiveInput, normalizedInputAmount, vaultAddress]);
+  }, [
+    mode,
+    withdrawInputMode,
+    hasPositiveInput,
+    inputUnits,
+    vaultAddress,
+    publicClient,
+    assetDecimals,
+    resolvedShareDecimals,
+  ]);
 
   useEffect(() => {
     if (mode !== "withdraw" || !shareBalance || shareBalance === 0n) {
@@ -217,30 +312,34 @@ export function AaveVaultModal({
       setShareBalanceInUsdc(null);
       return;
     }
+    if (!publicClient) {
+      setShareBalanceInUsdc(null);
+      return;
+    }
     setIsShareBalanceUsdcLoading(true);
-    void Promise.resolve(
-      redeemPreview({
-        vault: evmAddress(vaultAddress),
-        chainId: AAVE_TARGET_CHAIN_ID,
-        amount: bigDecimal(formatUnits(shareBalance, resolvedShareDecimals)),
-      }),
-    )
-      .then((result) => {
-        if (result.isOk() && result.value?.amount?.value != null) {
-          setShareBalanceInUsdc(
-            normalizeAmountForBigDecimal(
-              String(result.value.amount.value),
-              assetDecimals,
-            ),
-          );
-        } else {
-          setShareBalanceInUsdc(null);
-        }
+    publicClient
+      .readContract({
+        address: vaultAddress,
+        abi: ERC4626_CONVERT_ABI,
+        functionName: "convertToAssets",
+        args: [shareBalance],
+      })
+      .then((assets) => {
+        setShareBalanceInUsdc(
+          normalizeAmountForBigDecimal(formatUnits(assets, assetDecimals), assetDecimals)
+        );
       })
       .catch(() => setShareBalanceInUsdc(null))
       .finally(() => setIsShareBalanceUsdcLoading(false));
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- redeemPreview stable from hook
-  }, [mode, shareBalance, vaultAddress, assetDecimals, normalizeAmountForBigDecimal, resolvedShareDecimals]);
+  }, [
+    mode,
+    shareBalance,
+    vaultAddress,
+    assetDecimals,
+    normalizeAmountForBigDecimal,
+    resolvedShareDecimals,
+    publicClient,
+  ]);
 
   const shareBalanceInUsdcUnits = useMemo(() => {
     if (shareBalanceInUsdc == null) return null;
@@ -253,10 +352,7 @@ export function AaveVaultModal({
 
   const expectedSharesToBurnNormalized = useMemo(() => {
     if (expectedSharesToBurn == null) return null;
-    return normalizeAmountForBigDecimal(
-      expectedSharesToBurn,
-      expectedSharesToBurnDecimals,
-    );
+    return normalizeAmountForBigDecimal(expectedSharesToBurn, expectedSharesToBurnDecimals);
   }, [expectedSharesToBurn, expectedSharesToBurnDecimals, normalizeAmountForBigDecimal]);
 
   const expectedSharesToBurnUnits = useMemo(() => {
@@ -286,7 +382,7 @@ export function AaveVaultModal({
       });
       return hash;
     },
-    [walletClient, publicClient, userAddress],
+    [walletClient, publicClient, userAddress]
   );
 
   const resetForm = useCallback(() => {
@@ -301,7 +397,8 @@ export function AaveVaultModal({
 
   const validate = useCallback((): string | null => {
     if (!userAddress) {
-      if (authStatus === "initializing" || walletStatus === "in-progress") return "Wallet is connecting...";
+      if (authStatus === "initializing" || walletStatus === "in-progress")
+        return "Wallet is connecting...";
       return "Connect a wallet to continue.";
     }
     if (mode === "withdraw" && isShareDecimalsLoading) return "Loading share decimals...";
@@ -368,75 +465,65 @@ export function AaveVaultModal({
       setIsSubmitting(true);
       try {
         if (mode === "deposit") {
-          const depositResult = await deposit({
-            chainId: AAVE_TARGET_CHAIN_ID,
-            vault: evmAddress(vaultAddress),
-            amount: { value: bigDecimal(normalizedInputAmount) },
-            depositor: evmAddress(userAddress),
+          if (!assetAddress) {
+            setErrorMessage("Asset address is not configured for this vault.");
+            return;
+          }
+
+          // Check ERC-20 allowance and approve if needed
+          const allowance = await publicClient.readContract({
+            address: assetAddress,
+            abi: ERC20_ABI,
+            functionName: "allowance",
+            args: [userAddress, vaultAddress],
           });
 
-          if (depositResult.isErr()) {
-            setErrorMessage(depositResult.error?.message ?? "Deposit failed");
-            return;
+          if (allowance < inputUnits) {
+            const approveData = encodeFunctionData({
+              abi: ERC20_ABI,
+              functionName: "approve",
+              args: [vaultAddress, inputUnits],
+            });
+            await sendAndWait({ to: assetAddress, data: approveData });
           }
 
-          const plan = depositResult.value;
-          if (plan.__typename === "InsufficientBalanceError") {
-            setErrorMessage(`Insufficient balance. Required: ${plan.required?.value} ${assetSymbol}.`);
-            return;
-          }
+          const depositData = encodeFunctionData({
+            abi: ERC4626_DEPOSIT_ABI,
+            functionName: "deposit",
+            args: [inputUnits, userAddress],
+          });
+          const txHash = await sendAndWait({ to: vaultAddress, data: depositData });
 
-          if (plan.__typename === "TransactionRequest") {
-            await sendAndWait(plan);
-          } else {
-            await sendAndWait(plan.approval);
-            await sendAndWait(plan.originalTransaction);
-          }
-
-          toast.success("Deposit complete", {
+          showTxSuccessToast({
+            title: "Deposit complete",
             description: `${formatUsd(normalizedInputAmount)} ${assetSymbol} deposited successfully.`,
+            txHash,
           });
         } else {
+          // Withdraw directly via the vault's ERC-4626 contract.
+          // The Aave API is not needed for withdrawals and is unreliable
+          // (returns "Service panicked" errors), so we call the vault directly.
+          let txHash: string | undefined;
           if (withdrawInputMode === "shares") {
-            const redeemResult = await redeem({
-              chainId: AAVE_TARGET_CHAIN_ID,
-              vault: evmAddress(vaultAddress),
-              shares: { amount: bigDecimal(normalizedInputAmount) },
-              sharesOwner: evmAddress(userAddress),
+            const data = encodeFunctionData({
+              abi: ERC4626_REDEEM_ABI,
+              functionName: "redeem",
+              args: [inputUnits, userAddress, userAddress],
             });
-
-            if (redeemResult.isErr()) {
-              setErrorMessage(
-                (redeemResult.error as Error)?.message ?? "Withdraw failed",
-              );
-              return;
-            }
-
-            // For Aave `useVaultRedeemShares`, the hook is typed to return a TransactionRequest.
-            // Handle any failures via `redeemResult.isErr()` above.
-            await sendAndWait(redeemResult.value);
+            txHash = await sendAndWait({ to: vaultAddress, data });
           } else {
-            const withdrawResult = await withdraw({
-              chainId: AAVE_TARGET_CHAIN_ID,
-              vault: evmAddress(vaultAddress),
-              amount: { value: bigDecimal(normalizedInputAmount) },
-              sharesOwner: evmAddress(userAddress),
+            const data = encodeFunctionData({
+              abi: ERC4626_WITHDRAW_ABI,
+              functionName: "withdraw",
+              args: [inputUnits, userAddress, userAddress],
             });
-
-            if (withdrawResult.isErr()) {
-              setErrorMessage(
-                (withdrawResult.error as Error)?.message ?? "Withdraw failed",
-              );
-              return;
-            }
-
-            // For Aave `useVaultWithdraw`, the hook is typed to return a TransactionRequest.
-            // Handle any failures via `withdrawResult.isErr()` above.
-            await sendAndWait(withdrawResult.value);
+            txHash = await sendAndWait({ to: vaultAddress, data });
           }
 
-          toast.success("Withdraw complete", {
+          showTxSuccessToast({
+            title: "Withdraw complete",
             description: `${formatUsd(normalizedInputAmount)} ${assetSymbol} withdrawn successfully.`,
+            txHash,
           });
         }
 
@@ -444,8 +531,15 @@ export function AaveVaultModal({
         onSuccess?.();
         handleClose();
       } catch (err) {
-        const message = err instanceof Error ? err.message : mode === "deposit" ? "Deposit failed" : "Withdraw failed";
+        const message = normalizeTxErrorMessage(
+          err,
+          mode === "deposit" ? "Deposit failed" : "Withdraw failed"
+        );
         setErrorMessage(message);
+        showTxErrorToast({
+          title: mode === "deposit" ? "Deposit failed" : "Withdraw failed",
+          description: message,
+        });
       } finally {
         setIsSubmitting(false);
       }
@@ -460,15 +554,13 @@ export function AaveVaultModal({
       normalizedInputAmount,
       inputUnits,
       vaultAddress,
-      deposit,
-      redeem,
-      withdraw,
+      assetAddress,
       sendAndWait,
       assetSymbol,
       onSuccess,
       handleClose,
       resetForm,
-    ],
+    ]
   );
 
   const handleMaxClick = useCallback(() => {
@@ -481,7 +573,15 @@ export function AaveVaultModal({
         setInputAmount(shareBalanceInUsdc);
       }
     }
-  }, [mode, withdrawInputMode, userAssetBalance, shareBalance, shareBalanceInUsdc, assetDecimals, resolvedShareDecimals]);
+  }, [
+    mode,
+    withdrawInputMode,
+    userAssetBalance,
+    shareBalance,
+    shareBalanceInUsdc,
+    assetDecimals,
+    resolvedShareDecimals,
+  ]);
 
   if (!open) return null;
 
@@ -495,12 +595,13 @@ export function AaveVaultModal({
       showCloseButton
       className="max-w-lg bg-white text-slate-900"
     >
-      <form className="mt-6 flex w-full flex-col gap-5 text-sm text-slate-700" onSubmit={handleSubmit}>
+      <form
+        className="mt-6 flex w-full flex-col gap-5 text-sm text-slate-700"
+        onSubmit={handleSubmit}
+      >
         {mode === "withdraw" && (
           <div className="flex flex-col gap-2">
-            <span className="text-xs font-medium uppercase text-slate-500">
-              Withdraw by
-            </span>
+            <span className="text-xs font-medium text-slate-500 uppercase">Withdraw by</span>
             <div
               className="flex rounded-lg border border-slate-200 bg-slate-100 p-0.5"
               role="group"
@@ -511,6 +612,7 @@ export function AaveVaultModal({
                 onClick={() => {
                   setWithdrawInputMode("shares");
                   setInputAmount("");
+                  setErrorMessage(null);
                 }}
                 className={
                   "flex-1 rounded-md px-3 py-2 text-sm font-medium transition " +
@@ -528,6 +630,7 @@ export function AaveVaultModal({
                 onClick={() => {
                   setWithdrawInputMode("asset");
                   setInputAmount("");
+                  setErrorMessage(null);
                 }}
                 className={
                   "flex-1 rounded-md px-3 py-2 text-sm font-medium transition " +
@@ -546,7 +649,7 @@ export function AaveVaultModal({
         <section className="flex flex-col gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4">
           <label className="flex flex-col gap-2">
             <div className="flex items-center justify-between">
-              <span className="text-xs font-medium uppercase text-slate-500">
+              <span className="text-xs font-medium text-slate-500 uppercase">
                 {mode === "deposit"
                   ? `${assetSymbol} Amount`
                   : isWithdrawAssetMode
@@ -566,7 +669,9 @@ export function AaveVaultModal({
                       : isShareDecimalsLoading
                         ? "Loading shares..."
                         : `${formatVaultShares(shareBalance, resolvedShareDecimals ?? 18)} shares${
-                            shareBalanceInUsdc != null ? ` (≈ ${shareBalanceInUsdc} ${assetSymbol})` : ""
+                            shareBalanceInUsdc != null
+                              ? ` (≈ ${shareBalanceInUsdc} ${assetSymbol})`
+                              : ""
                           }`}
               </span>
             </div>
@@ -574,9 +679,12 @@ export function AaveVaultModal({
               type="text"
               inputMode="decimal"
               value={inputAmount}
-              onChange={(e) => setInputAmount(e.target.value)}
+              onChange={(e) => {
+                setInputAmount(e.target.value);
+                setErrorMessage(null);
+              }}
               placeholder="0.00"
-              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500"
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-slate-900 placeholder:text-slate-400 focus:border-slate-500 focus:ring-2 focus:ring-slate-500 focus:outline-none"
               aria-label={
                 mode === "deposit"
                   ? "Amount to deposit"
@@ -596,7 +704,7 @@ export function AaveVaultModal({
                       isShareBalanceUsdcLoading ||
                       shareBalanceInUsdcUnits === 0n)))
               }
-              className="self-end text-xs font-medium text-slate-600 underline hover:text-slate-800 disabled:opacity-50 disabled:no-underline"
+              className="self-end text-xs font-medium text-slate-600 underline hover:text-slate-800 disabled:no-underline disabled:opacity-50"
             >
               Max
             </button>
@@ -625,7 +733,7 @@ export function AaveVaultModal({
                     Shares to burn:{" "}
                     {formatVaultShares(
                       expectedSharesToBurnUnits,
-                      expectedSharesToBurnDecimals,
+                      expectedSharesToBurnDecimals
                     )}{" "}
                     shares
                   </>
